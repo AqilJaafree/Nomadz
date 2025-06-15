@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Edge Impulse WebAssembly</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        pre { background: #f8f9fa; padding: 10px; border-radius: 5px; overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>Edge Impulse WebAssembly Test</h1>
+    <div id="status">Starting test...</div>
+    <div id="results"></div>
+
+    <script>
+        const log = (message, type = 'info') => {
+            const statusDiv = document.getElementById('status');
+            const resultsDiv = document.getElementById('results');
+            
+            const logEntry = document.createElement('div');
+            logEntry.className = `status ${type}`;
+            logEntry.textContent = `${new Date().toLocaleTimeString()}: ${message}`;
+            
+            resultsDiv.appendChild(logEntry);
+            statusDiv.textContent = message;
+            
+            console.log(message);
+        };
+
+        const testEdgeImpulse = async () => {
+            try {
+                log('🔄 Testing Edge Impulse files...');
+
+                // Step 1: Check if files exist
+                try {
+                    const jsResponse = await fetch('/edge-impulse-standalone.js');
+                    if (!jsResponse.ok) throw new Error('JS file not found');
+                    log('✅ edge-impulse-standalone.js found', 'success');
+                } catch (e) {
+                    log('❌ edge-impulse-standalone.js not found - check public/ folder', 'error');
+                    return;
+                }
+
+                try {
+                    const wasmResponse = await fetch('/edge-impulse-standalone.wasm');
+                    if (!wasmResponse.ok) throw new Error('WASM file not found');
+                    log('✅ edge-impulse-standalone.wasm found', 'success');
+                } catch (e) {
+                    log('❌ edge-impulse-standalone.wasm not found - check public/ folder', 'error');
+                    return;
+                }
+
+                // Step 2: Try to load the module with minimal configuration
+                log('🔄 Loading WebAssembly module...');
+                
+                // Clean up any existing module
+                if (window.Module) delete window.Module;
+                
+                // Minimal Module configuration
+                window.Module = {
+                    onRuntimeInitialized: function() {
+                        log('✅ Runtime initialized!', 'success');
+                        testClassification();
+                    },
+                    onAbort: function(what) {
+                        log(`❌ Module aborted: ${what}`, 'error');
+                    },
+                    print: function(text) {
+                        log(`📄 Module: ${text}`);
+                    },
+                    printErr: function(text) {
+                        log(`❌ Module error: ${text}`, 'error');
+                    }
+                };
+
+                // Load the script
+                const script = document.createElement('script');
+                script.src = '/edge-impulse-standalone.js';
+                script.onload = () => {
+                    log('✅ Script loaded successfully', 'success');
+                };
+                script.onerror = () => {
+                    log('❌ Failed to load script', 'error');
+                };
+                document.head.appendChild(script);
+
+            } catch (error) {
+                log(`❌ Test failed: ${error.message}`, 'error');
+            }
+        };
+
+        const testClassification = () => {
+            try {
+                log('🔄 Testing model initialization...');
+                
+                // Try to initialize
+                Module.init();
+                log('✅ Module.init() successful!', 'success');
+                
+                // Get project info
+                try {
+                    const project = Module.get_project();
+                    log(`✅ Project: ${project.name} v${project.deploy_version}`, 'success');
+                } catch (e) {
+                    log(`⚠️ Could not get project info: ${e.message}`);
+                }
+
+                // Get properties
+                try {
+                    const props = Module.get_properties();
+                    log(`✅ Model properties: ${JSON.stringify(props)}`, 'success');
+                } catch (e) {
+                    log(`⚠️ Could not get properties: ${e.message}`);
+                }
+
+                // Test classification with dummy data
+                log('🔄 Testing classification...');
+                
+                // Create dummy features (96x96x3 = 27,648 RGB values)
+                const features = new Array(96 * 96 * 3).fill(128);
+                
+                // Convert to heap
+                const typedArray = new Float32Array(features);
+                const numBytes = typedArray.length * typedArray.BYTES_PER_ELEMENT;
+                const ptr = Module._malloc(numBytes);
+                const heapBytes = new Uint8Array(Module.HEAPU8.buffer, ptr, numBytes);
+                heapBytes.set(new Uint8Array(typedArray.buffer));
+
+                // Run classification
+                const result = Module.run_classifier(heapBytes.byteOffset, features.length, false);
+                
+                // Clean up
+                Module._free(ptr);
+                
+                if (result.result === 0) {
+                    const prediction = result.get(0).value;
+                    log(`✅ Classification successful! Prediction: ${prediction}`, 'success');
+                    log(`🎉 Your Edge Impulse model is working!`, 'success');
+                    
+                    // Show detailed results
+                    const resultsDiv = document.getElementById('results');
+                    const detailsDiv = document.createElement('div');
+                    detailsDiv.className = 'status info';
+                    detailsDiv.innerHTML = `
+                        <h3>Classification Results:</h3>
+                        <pre>Result code: ${result.result}
+Anomaly: ${result.anomaly}
+Number of outputs: ${result.size()}
+First prediction: ${result.get(0).value}
+Prediction label: ${result.get(0).label}</pre>
+                    `;
+                    resultsDiv.appendChild(detailsDiv);
+                    
+                } else {
+                    log(`❌ Classification failed with code: ${result.result}`, 'error');
+                }
+                
+            } catch (error) {
+                log(`❌ Classification test failed: ${error.message}`, 'error');
+                log(`Stack trace: ${error.stack}`, 'error');
+            }
+        };
+
+        // Start the test
+        testEdgeImpulse();
+    </script>
+</body>
+</html>
