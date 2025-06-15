@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Camera, Upload, Scale, Luggage, AlertCircle, X, RotateCcw, Wifi, WifiOff, TestTube } from 'lucide-react';
 import { useEdgeImpulse } from '../hooks/useEdgeImpulse';
+import { useDummyTokenMinting } from '../hooks/useDummyTokenMinting';
 
 const LuggageEstimator = () => {
     const [selectedImage, setSelectedImage] = useState(null);
@@ -14,6 +15,23 @@ const LuggageEstimator = () => {
     const videoRef = useRef(null);
     const canvasRef = useRef(null);
 
+    const { earnFromEstimation, isConnected } = useDummyTokenMinting();
+
+    // After successful prediction in handlePrediction function, add:
+    if (isConnected && predictionResult) {
+        // Automatically earn tokens for the estimation
+        setTimeout(async () => {
+            const earned = await earnFromEstimation({
+                weight: predictionResult.weight,
+                confidence: predictionResult.confidence || 0.5
+            });
+            
+            if (earned) {
+                // Show success message or notification
+                console.log('🎉 Earned NOMAD tokens for estimation!');
+            }
+        }, 2000); // Delay to let user see the weight result first
+    }
     // Real Edge Impulse integration
     const { 
         isInitialized, 

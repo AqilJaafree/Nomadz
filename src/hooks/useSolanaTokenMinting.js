@@ -1,36 +1,24 @@
-// src/hooks/useSolanaTokenMinting.js
 import { useState, useEffect, useCallback } from 'react';
 import { usePrivy, useSolanaWallets } from '@privy-io/react-auth';
 import { 
     Connection, 
     PublicKey, 
+    Keypair,
     Transaction,
-    SystemProgram,
-    LAMPORTS_PER_SOL
+    sendAndConfirmTransaction
 } from '@solana/web3.js';
 import {
-    createMint,
     getOrCreateAssociatedTokenAccount,
     mintTo,
     getAccount,
     TOKEN_PROGRAM_ID,
-    ASSOCIATED_TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
-import { Buffer } from 'buffer';
-
-// Ensure Buffer is available globally
-if (!window.Buffer) {
-    window.Buffer = Buffer;
-}
 
 // Configuration
-const SOLANA_RPC_URL = 'https://api.devnet.solana.com'; // Using devnet for testing
-const TOKEN_DECIMALS = 9; // Standard SPL token decimals
-const TOKEN_NAME = 'NOMAD';
-const TOKEN_SYMBOL = 'NOMAD';
-
-// Mock token mint address - in production, this would be your actual token mint
-const MOCK_TOKEN_MINT = 'FakeTokenMint1234567890123456789012345678901234567890';
+const SOLANA_RPC_URL = import.meta.env.VITE_SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const TOKEN_MINT_ADDRESS = import.meta.env.VITE_NOMAD_TOKEN_MINT;
+const MINT_AUTHORITY_KEY = import.meta.env.VITE_MINT_AUTHORITY_PRIVATE_KEY;
+const TOKEN_DECIMALS = 9;
 
 export const useSolanaTokenMinting = () => {
     const { ready, authenticated } = usePrivy();
@@ -42,27 +30,40 @@ export const useSolanaTokenMinting = () => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [transactionSignature, setTransactionSignature] = useState(null);
-    const [tokenMintAddress, setTokenMintAddress] = useState(MOCK_TOKEN_MINT);
+    const [mintAuthority, setMintAuthority] = useState(null);
 
-    // Initialize Solana connection
+    // Initialize Solana connection and mint authority
     useEffect(() => {
         const conn = new Connection(SOLANA_RPC_URL, 'confirmed');
         setConnection(conn);
+
+        // Initialize mint authority (in production, this should be server-side)
+        if (MINT_AUTHORITY_KEY) {
+            try {
+                const authorityKeypair = Keypair.fromSecretKey(
+                    new Uint8Array(JSON.parse(MINT_AUTHORITY_KEY))
+                );
+                setMintAuthority(authorityKeypair);
+                console.log('✅ Mint authority loaded:', authorityKeypair.publicKey.toString());
+            } catch (err) {
+                console.error('❌ Failed to load mint authority:', err);
+                setError('Failed to initialize mint authority');
+            }
+        } else {
+            setError('Mint authority private key not configured');
+        }
     }, []);
 
     // Check wallet connection status
     useEffect(() => {
-        const checkConnection = () => {
-            if (ready && authenticated && wallets && wallets.length > 0) {
-                setIsConnected(true);
-                setError(null);
-            } else {
-                setIsConnected(false);
-                setBalance(0);
-            }
-        };
-
-        checkConnection();
+        if (ready && authenticated && wallets && wallets.length > 0) {
+            setIsConnected(true);
+            setError(null);
+            fetchTokenBalance();
+        } else {
+            setIsConnected(false);
+            setBalance(0);
+        }
     }, [ready, authenticated, wallets]);
 
     // Get wallet instance
@@ -73,61 +74,39 @@ export const useSolanaTokenMinting = () => {
         return wallets[0];
     }, [wallets]);
 
-    // Get user's token balance
+    // Get user's actual token balance
     const fetchTokenBalance = useCallback(async () => {
-        if (!connection || !isConnected) return;
+        if (!connection || !isConnected || !TOKEN_MINT_ADDRESS) return;
 
         try {
             const wallet = getWallet();
             const walletPublicKey = new PublicKey(wallet.address);
+            const mintPublicKey = new PublicKey(TOKEN_MINT_ADDRESS);
 
-            // For demo purposes, we'll use a mock balance
-            // In production, you'd check the actual token account balance
-            const mockBalance = Math.floor(Math.random() * 100) + 50; // Random balance between 50-150
-            setBalance(mockBalance);
+            // Get associated token account
+            const tokenAccount = await getOrCreateAssociatedTokenAccount(
+                connection,
+                mintAuthority, // Using mint authority as payer (in production, use a different payer)
+                mintPublicKey,
+                walletPublicKey
+            );
+
+            const accountInfo = await getAccount(connection, tokenAccount.address);
+            const tokenBalance = Number(accountInfo.amount) / Math.pow(10, TOKEN_DECIMALS);
             
-            console.log('Token balance updated:', mockBalance);
+            setBalance(tokenBalance);
+            console.log('✅ Token balance fetched:', tokenBalance);
         } catch (err) {
-            console.error('Error fetching token balance:', err);
-            setError(`Failed to fetch balance: ${err.message}`);
+            console.error('❌ Error fetching token balance:', err);
+            // If account doesn't exist, balance is 0
+            setBalance(0);
         }
-    }, [connection, isConnected, getWallet]);
+    }, [connection, isConnected, getWallet, mintAuthority]);
 
-    // Fetch balance when connected
-    useEffect(() => {
-        if (isConnected) {
-            fetchTokenBalance();
-        }
-    }, [isConnected, fetchTokenBalance]);
-
-    // Create a new token mint (for demo purposes)
-    const createTokenMint = async () => {
-        if (!connection || !isConnected) {
-            throw new Error('Wallet not connected');
-        }
-
-        try {
-            const wallet = getWallet();
-            const payer = new PublicKey(wallet.address);
-
-            // This is a simplified version - in production you'd need proper keypair management
-            console.log('Creating token mint...');
-            
-            // For demo, we'll just return a mock mint address
-            const mockMintAddress = `NOMAD${Date.now()}${Math.random().toString(36).substr(2, 9)}`;
-            setTokenMintAddress(mockMintAddress);
-            
-            return mockMintAddress;
-        } catch (err) {
-            console.error('Error creating token mint:', err);
-            throw err;
-        }
-    };
-
-    // Mint tokens to user's wallet
+    // Real SPL token minting
     const mintTokens = async (amount = 10) => {
-        if (!connection || !isConnected) {
-            setError('Wallet not connected');
+        if (!connection || !isConnected || !mintAuthority || !TOKEN_MINT_ADDRESS) {
+            setError('Wallet not connected or mint authority not available');
             return false;
         }
 
@@ -137,23 +116,41 @@ export const useSolanaTokenMinting = () => {
 
         try {
             const wallet = getWallet();
-            console.log('Minting tokens to wallet:', wallet.address);
+            const userPublicKey = new PublicKey(wallet.address);
+            const mintPublicKey = new PublicKey(TOKEN_MINT_ADDRESS);
 
-            // Simulate token minting process
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate network delay
+            console.log('🔄 Starting token mint process...');
+            console.log('User wallet:', userPublicKey.toString());
+            console.log('Token mint:', mintPublicKey.toString());
+            console.log('Amount to mint:', amount);
 
-            // Create a mock transaction signature
-            const mockTxSignature = `${Date.now()}${Math.random().toString(36).substr(2, 20)}`;
-            
-            // Update local balance
+            // Get or create associated token account for the user
+            const tokenAccount = await getOrCreateAssociatedTokenAccount(
+                connection,
+                mintAuthority, // Payer for account creation
+                mintPublicKey,
+                userPublicKey
+            );
+
+            console.log('✅ Token account:', tokenAccount.address.toString());
+
+            // Mint tokens to user's account
+            const mintAmount = amount * Math.pow(10, TOKEN_DECIMALS);
+            const signature = await mintTo(
+                connection,
+                mintAuthority, // Payer for transaction
+                mintPublicKey,
+                tokenAccount.address,
+                mintAuthority, // Mint authority
+                mintAmount
+            );
+
+            console.log('✅ Tokens minted successfully!');
+            console.log('Transaction signature:', signature);
+
+            // Update state
+            setTransactionSignature(signature);
             setBalance(prevBalance => prevBalance + amount);
-            setTransactionSignature(mockTxSignature);
-            
-            console.log('Tokens minted successfully:', {
-                amount,
-                signature: mockTxSignature,
-                newBalance: balance + amount
-            });
 
             // Clear success message after 10 seconds
             setTimeout(() => {
@@ -162,7 +159,7 @@ export const useSolanaTokenMinting = () => {
 
             return true;
         } catch (err) {
-            console.error('Error minting tokens:', err);
+            console.error('❌ Error minting tokens:', err);
             setError(`Failed to mint tokens: ${err.message}`);
             return false;
         } finally {
@@ -170,97 +167,50 @@ export const useSolanaTokenMinting = () => {
         }
     };
 
-    // Real Solana token minting implementation (commented out for demo)
-    const mintTokensReal = async (amount = 10) => {
-        if (!connection || !isConnected) {
-            setError('Wallet not connected');
-            return false;
+    // Create a new NOMAD token mint (one-time setup)
+    const createNomadToken = async () => {
+        if (!connection || !mintAuthority) {
+            throw new Error('Connection or authority not available');
         }
 
-        setLoading(true);
-        setError(null);
-
         try {
-            const wallet = getWallet();
-            const userPublicKey = new PublicKey(wallet.address);
-            
-            // This would require proper implementation with:
-            // 1. Authority keypair for minting
-            // 2. Proper token mint creation or reference
-            // 3. Associated token account creation
-            // 4. Actual minting transaction
-            
-            /*
-            const mintPublicKey = new PublicKey(tokenMintAddress);
-            
-            // Get or create associated token account
-            const tokenAccount = await getOrCreateAssociatedTokenAccount(
+            console.log('🔄 Creating NOMAD token mint...');
+
+            // Import createMint function
+            const { createMint } = await import('@solana/spl-token');
+
+            const mintPublicKey = await createMint(
                 connection,
-                authorityKeypair, // You'd need this
-                mintPublicKey,
-                userPublicKey
+                mintAuthority, // Payer
+                mintAuthority.publicKey, // Mint authority
+                null, // Freeze authority (optional)
+                TOKEN_DECIMALS // Decimals
             );
 
-            // Mint tokens
-            const signature = await mintTo(
-                connection,
-                authorityKeypair, // You'd need this
-                mintPublicKey,
-                tokenAccount.address,
-                authorityKeypair, // You'd need this
-                amount * Math.pow(10, TOKEN_DECIMALS)
-            );
-            */
+            console.log('✅ NOMAD token created:', mintPublicKey.toString());
+            console.log('Add this to your .env file:');
+            console.log(`VITE_NOMAD_TOKEN_MINT=${mintPublicKey.toString()}`);
 
-            console.log('Real minting would happen here');
-            return true;
+            return mintPublicKey.toString();
         } catch (err) {
-            console.error('Error in real minting:', err);
-            setError(`Minting failed: ${err.message}`);
-            return false;
-        } finally {
-            setLoading(false);
+            console.error('❌ Error creating token:', err);
+            throw err;
         }
     };
 
-    // Get SOL balance (for reference)
-    const getSolBalance = async () => {
-        if (!connection || !isConnected) return 0;
-
-        try {
-            const wallet = getWallet();
-            const publicKey = new PublicKey(wallet.address);
-            const balance = await connection.getBalance(publicKey);
-            return balance / LAMPORTS_PER_SOL;
-        } catch (err) {
-            console.error('Error fetching SOL balance:', err);
-            return 0;
-        }
-    };
-
-    // Request SOL airdrop (devnet only)
-    const requestAirdrop = async (amount = 1) => {
-        if (!connection || !isConnected) {
-            setError('Wallet not connected');
-            return false;
-        }
-
-        try {
-            const wallet = getWallet();
-            const publicKey = new PublicKey(wallet.address);
-            const signature = await connection.requestAirdrop(
-                publicKey,
-                amount * LAMPORTS_PER_SOL
-            );
-            
-            await connection.confirmTransaction(signature);
-            console.log('Airdrop successful:', signature);
-            return true;
-        } catch (err) {
-            console.error('Airdrop failed:', err);
-            setError(`Airdrop failed: ${err.message}`);
-            return false;
-        }
+    // Generate mint authority keypair (one-time setup)
+    const generateMintAuthority = () => {
+        const keypair = Keypair.generate();
+        console.log('✅ New mint authority generated:');
+        console.log('Public Key:', keypair.publicKey.toString());
+        console.log('Private Key (save securely):', JSON.stringify(Array.from(keypair.secretKey)));
+        console.log('Add this to your .env file:');
+        console.log(`VITE_MINT_AUTHORITY_PRIVATE_KEY=${JSON.stringify(Array.from(keypair.secretKey))}`);
+        
+        return {
+            publicKey: keypair.publicKey.toString(),
+            privateKey: Array.from(keypair.secretKey)
+        };
     };
 
     // Clear error
@@ -273,17 +223,17 @@ export const useSolanaTokenMinting = () => {
         loading,
         error,
         transactionSignature,
-        tokenMintAddress,
+        tokenMintAddress: TOKEN_MINT_ADDRESS,
         connection,
 
         // Actions
         mintTokens,
-        mintTokensReal, // For real implementation
-        createTokenMint,
         fetchTokenBalance,
-        getSolBalance,
-        requestAirdrop,
         clearError,
+
+        // Setup functions (for initial configuration)
+        createNomadToken,
+        generateMintAuthority,
 
         // Utils
         getWallet,
